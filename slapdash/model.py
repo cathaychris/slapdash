@@ -233,6 +233,8 @@ class Model:
         return super(Model, cls).__new__(cls)
 
     def __init__(self, interface, parent=None, name='', *args, **kwargs):
+        if type(interface) == type(None):
+            raise AttributeError(f'Interface `{name}` (parent `{parent.name}`) is None and cannot be built. Check that returned data types are consistent.')
         interface.__data_model__ = self
         self._interface = interface
         self._parent = parent
