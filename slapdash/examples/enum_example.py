@@ -25,7 +25,7 @@ class ColorfulDashboard:
     from which you can select an option. The value passed
     to the server is the string value of the enumerator, not the
     Pythonic keyword.'''
-    
+
     color = Color.GREEN
     _display = DisplayType.CURRENT
 

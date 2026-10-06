@@ -41,9 +41,10 @@ export default class Method extends React.PureComponent<
     event.preventDefault();
 
     let args = {};
-    this.props.args.forEach(
-      ([name, type]) => (args[name] = event.target[name].value)
-    );
+    // leave out empty fields, so that the method's default values apply
+    this.props.args.forEach(([name, type]) => {
+      if (event.target[name].value !== "") args[name] = event.target[name].value;
+    });
     const result = await axios.post(
       buildUrl(this.props.api, {
         path: format_endpoint(this.props.fullName),

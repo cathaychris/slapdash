@@ -399,7 +399,7 @@ export function fnClampNumericTyping(props) {
       // component.refsInput.selectionStart = component.state.selectionStart; // just to be sure
       // component.refsInput.selectionEnd = component.state.selectionEnd;
       // BUG: this will not move the cursor without changing where the number is inserted!
-    }
+    // }
   }
 }
 

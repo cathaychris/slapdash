@@ -5,21 +5,22 @@
 # Author: Carmelo Mordini <cmordini@phys.ethz.ch>
 import argparse
 import runpy
-import pkg_resources
 from pathlib import Path
 
-examples = Path(pkg_resources.resource_filename('slapdash', 'examples'))
+examples = Path(__file__).parent / 'examples'
+
+
+def get_examples():
+    return sorted(p.stem for p in examples.iterdir() if p.suffix == '.py')
 
 
 def list_examples():
-    examples_list = [f"- {p.stem}" for p in examples.iterdir() if p.suffix == '.py']
-    examples_list.sort()
     print("Available examples")
-    print("\n".join(examples_list))
+    print("\n".join(f"- {name}" for name in get_examples()))
 
 
 def run_example(path):
-    runpy.run_path((examples / path).with_suffix('.py'), run_name='__main__')
+    runpy.run_path(str((examples / path).with_suffix('.py')), run_name='__main__')
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import inspect
 import asyncio
 import socketio
 import logging
+from contextlib import asynccontextmanager
 from typing import Tuple, List
 
 from collections.abc import Sequence
@@ -14,9 +15,10 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
-from .model import Model, READONLY, BASE_TYPES
+from .model import Model
+from .types import READONLY, BASE_TYPES
 from .version import __version__
 
 
@@ -28,20 +30,24 @@ def web_api(
         frontend=None,
         css=None,
         enable_CORS: bool = True,
-        info: dict = {},
+        info: dict = None,
         *args, **kwargs):
     '''
     Automatically generate a set of REST endpoints for a FastAPI web interface
     '''
+    info = {} if info is None else info
 
     # the socketio ASGI app, to notify clients when params update
     if enable_CORS:
         sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
     else:
         sio = socketio.AsyncServer(async_mode='asgi')
-    sio_app = socketio.ASGIApp(sio)
 
     data_model_emit = data_model.emit
+    # the event loop serving the app, set on startup. Model changes can be triggered from
+    # other threads (e.g. sync endpoints run in a threadpool, or user threads), so
+    # notifications are always scheduled onto this loop.
+    server_loop = None
 
     def emit(message):
         data_model_emit(message)
@@ -55,16 +61,16 @@ def web_api(
                 callback_method = getattr(data_model._interface, callback)
                 callback_method(message)
 
+        if server_loop is None or server_loop.is_closed():
+            return  # server not started yet, so there is nobody to notify
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(_notify())
-            else:
-                loop.run_until_complete(_notify())
+            running_loop = asyncio.get_running_loop()
         except RuntimeError:
-            # no loop yet
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(_notify())
+            running_loop = None
+        if running_loop is server_loop:
+            server_loop.create_task(_notify())
+        else:
+            asyncio.run_coroutine_threadsafe(_notify(), server_loop)
 
     data_model.emit = emit
 
@@ -82,17 +88,20 @@ def web_api(
 
     endpoints: List[str] = []
 
+    # Routes use `response_model=None`: the annotations of the generated endpoints document
+    # the API, but are not precise enough (e.g. for nested objects or mixed-type lists) to
+    # validate responses against, as FastAPI otherwise does with return annotations.
     def add_endpoint(name):
         '''automatically create an endpoint based on the property name in the data model attributes'''
         url, args = format_url(name)
         if url not in endpoints:
             if props['type'] == 'method':
                 # methods need to be POST, because they take arguments passed into the body
-                (rest_app.post(url))(method_factory(data_model, name, args))
+                (rest_app.post(url, response_model=None))(method_factory(data_model, name, args))
             else:
-                (rest_app.get(url))(get_factory(data_model, name, args))
+                (rest_app.get(url, response_model=None))(get_factory(data_model, name, args))
                 if (READONLY not in props) and (not isinstance(props['type'], (dict))):
-                    (rest_app.post(url))(set_factory(data_model, name, args))
+                    (rest_app.post(url, response_model=None))(set_factory(data_model, name, args))
 
             # keep a list of endpoints created to we don't generate the same one multiple times
             # for example for attributes which are lists of objects
@@ -126,7 +135,7 @@ def web_api(
 
     for name, props in data_model.flat_props().items():
         if name in [r.path.replace(r'/', '') for r in rest_app.routes] + ['ws', 'docs']:
-            logger.warn(f'The name `{name}` is reserved for slapdash, but has been used as a parameter in the model. Unexpected results may occur.')
+            logger.warning(f'The name `{name}` is reserved for slapdash, but has been used as a parameter in the model. Unexpected results may occur.')
         add_endpoint(name)
 
         if isinstance(props['type'], list):
@@ -146,11 +155,18 @@ def web_api(
     # mount the front end on the root endpoint last for lowest routing priority
     rest_app.mount('/', StaticFiles(directory=frontend, html=True))
 
+    @asynccontextmanager
+    async def lifespan(_app):
+        nonlocal server_loop
+        server_loop = asyncio.get_running_loop()
+        yield
+
     # the top level app
-    app = FastAPI()
-    # Finally, mount the socket.io app and the REST app to the top level app
-    app.mount('/ws', sio_app)
+    app = FastAPI(lifespan=lifespan)
+    # Finally, serve socket.io at /ws/socket.io in front of the REST app. This is done as a
+    # middleware rather than a mount, as mounted apps see the full path in newer Starlette.
     app.mount('/', rest_app)
+    app.add_middleware(SocketIOMiddleware, sio=sio, socketio_path='ws/socket.io')
 
     # make top level app docs point at rest_app
     app.openapi = get_custom_openapi(rest_app, name=data_model.name)
@@ -161,12 +177,32 @@ def web_api(
             await sio.emit('notify', {'data': {'exception': str(exc), 'type': exc.__class__.__name__}})
             raise
 
+        # errors from invalid input, e.g. an unknown enum value, are reported back to the
+        # caller with their message instead of as a generic internal server error
+        async def bad_request_handler(request: Request, exc: Exception):
+            message = str(exc.args[0]) if len(exc.args) == 1 else str(exc)
+            await sio.emit('notify', {'data': {'exception': message, 'type': exc.__class__.__name__}})
+            return JSONResponse(status_code=400, content={'detail': f'{exc.__class__.__name__}: {message}'})
+
+        for exc_class in (KeyError, ValueError, TypeError):
+            _app.add_exception_handler(exc_class, bad_request_handler)
+
     # add_exception_handlers(app)
     add_exception_handlers(rest_app)
     app._rest_app = rest_app
     app._sio = sio
 
     return app
+
+
+class SocketIOMiddleware:
+    '''ASGI middleware serving a socket.io server at `socketio_path`, passing other requests on.'''
+
+    def __init__(self, app, sio: socketio.AsyncServer, socketio_path: str):
+        self._asgi = socketio.ASGIApp(sio, other_asgi_app=app, socketio_path=socketio_path)
+
+    async def __call__(self, scope, receive, send):
+        await self._asgi(scope, receive, send)
 
 
 def format_url(name: str):
@@ -196,7 +232,7 @@ def get_custom_openapi(app: FastAPI, name: str = None):
         openapi_schema = get_openapi(
             title="Slapdash Interface" + ('' if name is None else ': ' + name),
             version=__version__,
-            description="REST API for Slapdash interface " + name,
+            description="REST API for Slapdash interface" + ('' if name is None else ' ' + name),
             routes=app.routes,
         )
         openapi_schema["info"]["x-logo"] = {
@@ -207,7 +243,7 @@ def get_custom_openapi(app: FastAPI, name: str = None):
     return custom_openapi
 
 
-def get_factory(model: Model, name: str, args: Tuple[str] = []):
+def get_factory(model: Model, name: str, args: Tuple[str, ...] = ()):
     prop_name = name
     while prop_name.endswith('[]'):
         prop_name = prop_name[:-2]
@@ -217,7 +253,7 @@ def get_factory(model: Model, name: str, args: Tuple[str] = []):
         return model[name]
 
     try:
-        if isinstance(props['type'], List):
+        if isinstance(props['type'], list):
             props_shape = get_shape(props['type'])
             base_type = access_deep_list(props['type'], [0 for r in range(len(props_shape))])
             value_type = nested_list_type(BASE_TYPES[base_type], depth=len(props_shape)-1)
@@ -248,19 +284,19 @@ def get_factory(model: Model, name: str, args: Tuple[str] = []):
 
     signature = inspect.signature(_func)
     signature = signature.replace(parameters=tuple(inspect.Parameter(
-        name=name, kind=inspect._ParameterKind.POSITIONAL_OR_KEYWORD, annotation=int) for name in args))
+        name=name, kind=inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=int) for name in args))
     _func.__signature__ = signature
     return _func
 
 
-def set_factory(model: Model, name: str, args: Tuple[str] = []):
+def set_factory(model: Model, name: str, args: Tuple[str, ...] = ()):
     prop_name = name
     while prop_name.endswith('[]'):
         prop_name = prop_name[:-2]
     props = model.flat_props()[prop_name]
 
     try:
-        if isinstance(props['type'], List):
+        if isinstance(props['type'], list):
             props_shape = get_shape(props['type'])
             base_type = access_deep_list(props['type'], [0 for r in range(len(props_shape))])
             if prop_name == name:
@@ -288,7 +324,7 @@ def set_factory(model: Model, name: str, args: Tuple[str] = []):
                 iname = iname.replace(key, str(val))
             model[iname] = value
             model_value = model[iname]
-        elif isinstance(props['type'], List):
+        elif isinstance(props['type'], list):
             for index, item in enumerate(value):
                 model[f'{name}[{index}]'] = item
             model_value = model[name]
@@ -305,13 +341,13 @@ def set_factory(model: Model, name: str, args: Tuple[str] = []):
 
     signature = inspect.signature(_func)
     signature = signature.replace(parameters=(inspect.Parameter(
-        name='value', kind=inspect._ParameterKind.POSITIONAL_OR_KEYWORD, annotation=value_type),) + tuple(inspect.Parameter(
-            name=name, kind=inspect._ParameterKind.POSITIONAL_OR_KEYWORD, annotation=int) for name in args))
+        name='value', kind=inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=value_type),) + tuple(inspect.Parameter(
+            name=name, kind=inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=int) for name in args))
     _func.__signature__ = signature
     return _func
 
 
-def method_factory(model: Model, name: str, path_args: Tuple[str] = []):
+def method_factory(model: Model, name: str, path_args: Tuple[str, ...] = ()):
 
     def _func(**kwargs):
         iname, indexes = re.subn(r'\[\d*\]', r'[index]', name)
@@ -333,13 +369,14 @@ def method_factory(model: Model, name: str, path_args: Tuple[str] = []):
 
     path_params = tuple(
         inspect.Parameter(name=name,
-                          kind=inspect._ParameterKind.POSITIONAL_OR_KEYWORD,
+                          kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
                           annotation=int) for name in path_args)
 
     method_params = tuple(
         inspect.Parameter(name=name,
-                          kind=inspect._ParameterKind.POSITIONAL_OR_KEYWORD,
-                          annotation=parameter._annotation)
+                          kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                          default=parameter.default,
+                          annotation=parameter.annotation)
         for name, parameter in signature.parameters.items() if name != 'self')
 
     signature = signature.replace(parameters=path_params + method_params)
@@ -365,13 +402,13 @@ def get_shape(lst, shape=()):
     # peek ahead and assure all lists in the next depth
     # have the same length (also critical for the dashboard!)
     if isinstance(lst[0], Sequence) and not isinstance(lst, str):
-        l = len(lst[0])
-        if not all(len(item) == l for item in lst):
+        length = len(lst[0])
+        if not all(len(item) == length for item in lst):
             msg = 'not all lists have the same length'
             raise ValueError(msg)
 
     shape += (len(lst), )
-    
+
     # recurse
     shape = get_shape(lst[0], shape)
 

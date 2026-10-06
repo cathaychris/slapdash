@@ -1,15 +1,14 @@
 import * as React from "react";
-import ReactDOM from "react-dom";
+import { createRoot } from "react-dom/client";
 import App from "./app";
 
-import version from "../../slapdash/version.json";
+declare const __SLAPDASH_VERSION__: string; // injected by build.mjs
 
 let api = document.location.href;
 if (process.env.NODE_ENV === "development") {
   api = "http://localhost:8000";
   console.log("development");
-  console.log(version);
-  console.log(`${version.major}.${version.minor}.${version.patch}`);
+  console.log(__SLAPDASH_VERSION__);
 }
 
-ReactDOM.render(<App api={api} />, document.getElementById("root"));
+createRoot(document.getElementById("root")).render(<App api={api} />);

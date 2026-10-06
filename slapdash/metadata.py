@@ -99,7 +99,8 @@ def sanitize_metadata_entry(interface, prop_name, mdata, prop=None):
         prop_type = get_prop_type(prop)
         sanitized[prop_name] = {}
         for key, value in mdata.items():
-            if check_valid(key, prop_name) and check_type(key, value, prop_name) and check_prop_type(key, prop_type, prop_name):
+            if (check_valid(key, prop_name) and check_type(key, value, prop_name)
+                    and check_prop_type(key, prop_type, prop_name) and check_value(key, value, prop_name)):
                 sanitized[prop_name][key] = value
         logger.info(f"Validated metadata for property `{prop_name}`")
     except AttributeError:
@@ -114,7 +115,7 @@ def get_prop_type(prop):
     elif inspect.ismethod(prop):
         return 'method'
     elif isinstance(prop, (list, tuple)):
-        return type(prop[0]).__name__
+        return type(prop[0]).__name__ if len(prop) else type(prop).__name__
     else:
         return 'group'
 

@@ -1,11 +1,36 @@
 import requests
 import re
-import json
 import inspect
-import urllib
-from .model import BASE_TYPES
+import urllib.parse
+from .types import BASE_TYPES
 from .version import __version__, __major__, __minor__
 from typing import Any
+
+
+def name_to_endpoint(name: str) -> str:
+    '''Convert a model name like `a.b[0].c` to its REST endpoint path `a/b/0/c`.'''
+    return re.sub(r"\]", "", re.sub(r"\.|\[", "/", name))
+
+
+class RemoteError(Exception):
+    '''An error reported by a slapdash server.'''
+
+
+def raise_for_response(resp: requests.Response):
+    '''Raise an informative exception for a failed request to a slapdash server.'''
+    if resp.ok:
+        return
+    if resp.status_code >= 500:
+        raise RemoteError("Server Error: {}".format(resp.text))
+    try:
+        detail = resp.json()["detail"]
+    except (ValueError, KeyError, TypeError):
+        detail = resp.text
+    if isinstance(detail, list) and detail and isinstance(detail[0], dict):
+        detail = detail[0].get("msg", detail[0])
+    if resp.status_code == 405:
+        detail = f"{resp.url} is read only"
+    raise RemoteError(detail)
 
 
 class ComClient:
@@ -32,8 +57,8 @@ class RequestClient(ComClient):
         )
         try:
             return req.json()
-        except json.decoder.JSONDecodeError:
-            raise Exception("Server Error: {}".format(req.text))
+        except requests.exceptions.JSONDecodeError:
+            raise RemoteError("Server Error: {}".format(req.text))
 
     def get_props(self, name: str):
         return self("get_props", name=name)
@@ -42,23 +67,18 @@ class RequestClient(ComClient):
         return self("get_param", name=name)
 
     def set_param(self, name: str, value):
-        endpoint = re.sub("\]", "", re.sub("\.|\[", "/", name))  # noqa
         params = {"value": value}
-        self._session.post(self._url + endpoint, timeout=self._timeout, params=params)
+        resp = self._session.post(self._url + name_to_endpoint(name), timeout=self._timeout, params=params)
+        raise_for_response(resp)
 
     def remote_call(self, method_name: str, **kwargs):
         resp = self._session.post(
-            self._url + re.sub("\]", "", re.sub("\.|\[", "/", method_name)),  # noqa
+            self._url + name_to_endpoint(method_name),
             timeout=self._timeout,
             params=kwargs,
         )
-        if resp.ok:
-            return resp.json()
-        elif resp.status_code < 500:
-            error = json.loads(resp.text)["detail"][0]["msg"]
-            raise Exception(error)
-        else:
-            raise Exception("Server Error: {}".format(resp.text))
+        raise_for_response(resp)
+        return resp.json()
 
 
 class CustomClient:
@@ -129,7 +149,7 @@ def make_function(client: ComClient, name: str, args: list, doc: str = None, **k
             inspect.Parameter(
                 name=arg_name,
                 annotation=annotation,
-                kind=inspect._ParameterKind.POSITIONAL_OR_KEYWORD,
+                kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
             )
         )
     signature = signature.replace(parameters=parameters)
@@ -188,7 +208,7 @@ class Client:
 
         version = client("version")
         if version != __version__:
-            major, minor, _ = [int(v) for v in version.split(".")]
+            major, minor = [int(v) for v in version.split(".")[:2]]
             if major != __major__:
                 raise RuntimeWarning(
                     f"version mismatch: server is using slapdash version `{version}`, but client is using version `{__version__}`"
@@ -228,15 +248,15 @@ class SimpleRequestClient:
 
     def set(self, name: str, value: Any) -> None:
         params = {"value": value}
-        endpoint = re.sub("\]", "", re.sub("\.|\[", "/", name))  # noqa
-        requests.post(self._url + endpoint, timeout=self._timeout, params=params)
+        resp = requests.post(self._url + name_to_endpoint(name), timeout=self._timeout, params=params)
+        raise_for_response(resp)
 
     def __call__(self, method_name: str, timeout=1.0, **kwargs):
         req = requests.get(method_name, timeout=timeout, params=kwargs)
         try:
             return req.json()
-        except json.decoder.JSONDecodeError:
-            raise Exception("Server Error: {}".format(req.text))
+        except requests.exceptions.JSONDecodeError:
+            raise RemoteError("Server Error: {}".format(req.text))
 
 
 class SimpleClient:

@@ -164,7 +164,7 @@ class HeavilyNested:
 
     _array3d1 = [[[1.1, 2.1],],]
     array3d2 = [[[1.11, 2.11],],]
-    
+
     subclass_permanent = Subclass()
     list_of_subclasses = [Subclass(), Subclass(), Subclass()]
 

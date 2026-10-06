@@ -8,15 +8,7 @@ from enum import Enum
 from .types import READONLY, BASE_TYPES
 from .metadata import sanitize_metadata_entry
 
-
-READONLY = 'readonly'
-BASE_TYPES = {
-    'str': str,
-    'int': int,
-    'float': float,
-    'bool': bool,
-    'enum': str
-}
+_UNSET = object()
 
 
 class ModelList:
@@ -233,8 +225,9 @@ class Model:
         return super(Model, cls).__new__(cls)
 
     def __init__(self, interface, parent=None, name='', *args, **kwargs):
-        if type(interface) == type(None):
-            raise AttributeError(f'Interface `{name}` (parent `{parent.name}`) is None and cannot be built. Check that returned data types are consistent.')
+        if interface is None:
+            parent_name = parent.name if parent is not None else None
+            raise AttributeError(f'Interface `{name}` (parent `{parent_name}`) is None and cannot be built. Check that returned data types are consistent.')
         interface.__data_model__ = self
         self._interface = interface
         self._parent = parent
@@ -314,10 +307,38 @@ class Model:
     def props(self, name: Union[str, int] = None):
         if name is None:
             return self._props
-        if hasattr(self[self._lookup(name)], '_props'):
-            return self[self._lookup(name)]._props
-        else:
-            return None
+        name = self._lookup(name)
+        # Prefer the props recorded at build time, so that looking up the structure
+        # does not evaluate properties (which may e.g. read from hardware).
+        try:
+            prop_type = self._prop_type(name)
+        except (KeyError, IndexError, ValueError, TypeError):
+            # e.g. a list that has grown since the model was built
+            obj = self[name]
+            return obj._props if hasattr(obj, '_props') else None
+        return prop_type if isinstance(prop_type, dict) else None
+
+    def _prop_type(self, name: str):
+        '''Look up the type recorded in `_props` for a dotted/indexed name like `a.b[0].c`.'''
+        prop_type = self._props
+        for part in re.sub(r'\[(\d+)\]', r'.\1', name).split('.'):
+            if isinstance(prop_type, dict):
+                prop_type = prop_type[part]['type']
+            elif isinstance(prop_type, list):
+                prop_type = prop_type[int(part)]
+            else:
+                raise KeyError(name)
+        return prop_type
+
+    def iter_interfaces(self):
+        '''Yield the wrapped interface and every nested object interface of the model.
+
+        Only attributes that were built as sub-models (objects, or lists containing objects)
+        are visited, so plain value properties are not evaluated.'''
+        yield self._interface
+        for key, prop in self._props.items():
+            if isinstance(prop['type'], (dict, list)):
+                yield from _iter_interfaces(self[key])
 
     def flat_props(self, name: Union[str, int] = None):
         return self._flatten_props(self.props(name))
@@ -404,7 +425,7 @@ class Model:
                         extra_metadata = name_class._object_metadata
                     elif type(name_class) == property:
                         if hasattr(name_class.fget, '_object_metadata'):
-                            extra_metadata = getattr(name_class.fget, '_object_metadata')
+                            extra_metadata = name_class.fget._object_metadata
                     if extra_metadata:
                         if hasattr(interface, '_metadata'):
                             try:
@@ -416,13 +437,13 @@ class Model:
                 # variables created in __init__ will not be in __class__, but cannot be decorated anyway
                 except AttributeError:
                     pass
-                
+
                 value = interface.__getattribute__(name)
                 obj = Model(value, parent=self, name=name)
                 self._props[name] = {
                     'name': name,
                     'type': self._get_type(obj),
-                    **self._get_properties(interface, name),
+                    **self._get_properties(interface, name, value),
                     'index': self._index
                 }
 
@@ -446,57 +467,38 @@ class Model:
         else:
             raise TypeError(f'{interface} is an unknown type')
 
-    def _get_properties(self, obj, name):
+    def _get_properties(self, obj, name, value):
         '''finds optional properties of an objects attributes
 
         if an attribute is a @property without a setter, then it is is given the prop 'readonly'
 
         if an attribute is a @property or a function with a defined __doc__ string then it is given the prop doc
+
+        `value` is the already evaluated attribute, so that properties are not read again here
         '''
         props = {}
-        # CM: I suspect that the loop is at this point equivalent to
-        # attr = getattr(obj, name)
         for cls in type(obj).__mro__:
-            # print(name, issubclass(cls, type(self)))
-            if cls is not object:
-                if name in cls.__dict__: # a hard-coded class attribute
-                    attr = cls.__dict__[name]
-                    if isinstance(attr, property):
-                        if attr.fset is None:
-                            props[READONLY] = True
-                    if isinstance(attr, types.FunctionType):
-                        props[READONLY] = True
-                        props['args'] = tuple(((key.name, key.annotation.__name__ if key.annotation is not inspect._empty else None)
-                                               for key in inspect.signature(attr).parameters.values()))[1:]
-                    if isinstance(attr, (property, types.FunctionType)):
-                        if attr.__doc__ is not None:
-                            props['doc'] = attr.__doc__
-                    elif not isinstance(attr, tuple(list(BASE_TYPES.values()) + [UserList, Enum, tuple, list])):
-                        if attr.__doc__ is not None:
-                            props['doc'] = attr.__doc__
-                    if isinstance(attr, Enum):
-                        props['enums'] = ModelEnum(attr)._enums
-                    if isinstance(attr, property) and isinstance(attr.fget(obj), Enum):
-                        props['enums'] = ModelEnum(attr.fget(obj))._enums
-                else: # an attribute initialized during instantiation
-                    attr = getattr(obj, name)
-                    if isinstance(attr, property):
-                        if attr.fset is None:
-                            props[READONLY] = True
-                    if isinstance(attr, types.FunctionType):
-                        props[READONLY] = True
-                        props['args'] = tuple(((key.name, key.annotation.__name__ if key.annotation is not inspect._empty else None)
-                                               for key in inspect.signature(attr).parameters.values()))[1:]
-                    if isinstance(attr, (property, types.FunctionType)):
-                        if attr.__doc__ is not None:
-                            props['doc'] = attr.__doc__
-                    elif not isinstance(attr, tuple(list(BASE_TYPES.values()) + [UserList, Enum, tuple, list])):
-                        if attr.__doc__ is not None:
-                            props['doc'] = attr.__doc__
-                    if isinstance(attr, Enum):
-                        props['enums'] = ModelEnum(attr)._enums
-                    if isinstance(attr, property) and isinstance(attr.fget(obj), Enum):
-                        props['enums'] = ModelEnum(attr.fget(obj))._enums
+            if cls is object:
+                continue
+            # a hard-coded class attribute, or else an attribute initialized during instantiation
+            attr = cls.__dict__[name] if name in cls.__dict__ else value
+            if isinstance(attr, property):
+                if attr.fset is None:
+                    props[READONLY] = True
+            if isinstance(attr, types.FunctionType):
+                props[READONLY] = True
+                props['args'] = tuple(((key.name, key.annotation.__name__ if key.annotation is not inspect.Parameter.empty else None)
+                                       for key in inspect.signature(attr).parameters.values()))[1:]
+            if isinstance(attr, (property, types.FunctionType)):
+                if attr.__doc__ is not None:
+                    props['doc'] = attr.__doc__
+            elif not isinstance(attr, tuple(list(BASE_TYPES.values()) + [UserList, Enum, tuple, list])):
+                if attr.__doc__ is not None:
+                    props['doc'] = attr.__doc__
+            if isinstance(attr, Enum):
+                props['enums'] = ModelEnum(attr)._enums
+            if isinstance(attr, property) and isinstance(value, Enum):
+                props['enums'] = ModelEnum(value)._enums
         return props
 
     def _lookup(self, value: Union[str, int]) -> str:
@@ -512,7 +514,7 @@ class Model:
     def _set(self, name: Union[str, int], value: Any):
         self._value_by_name(self._lookup(name), value)
 
-    def _value_by_name(self, name: str, value: Any = None):
+    def _value_by_name(self, name: str, value: Any = _UNSET):
         obj = self
         attributes = re.sub(r'\[(\d+)\]', r'.\1', name).split('.')
         for attribute in attributes[:-1]:
@@ -520,7 +522,7 @@ class Model:
 
         if attributes[-1] not in obj:
             raise KeyError(name)
-        if value is None:
+        if value is _UNSET:
             return obj[attributes[-1]]
         else:
             obj[attributes[-1]] = value
@@ -528,3 +530,11 @@ class Model:
     def emit(self, message):
         if self._parent is not None:
             self._parent.emit(message)
+
+
+def _iter_interfaces(node):
+    if isinstance(node, Model):
+        yield from node.iter_interfaces()
+    elif isinstance(node, ModelList):
+        for index in range(len(node._interface)):
+            yield from _iter_interfaces(node[index])
