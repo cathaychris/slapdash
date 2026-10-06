@@ -1,0 +1,51 @@
+name: publish
+
+# Publishes to PyPI when a GitHub release is published, e.g. with tag `v1.1.0`.
+# Uses PyPI trusted publishing: the `slapdash` project on pypi.org must list this
+# repository, workflow `publish.yml` and environment `pypi` as a trusted publisher.
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check that the release tag matches the package version
+        run: |
+          version=$(python -c "import re; print(re.search(r'__version__ = \"(.+)\"', open('slapdash/version.py').read()).group(1))")
+          if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "Release tag $GITHUB_REF_NAME does not match slapdash version $version"
+            exit 1
+          fi
+      - run: python -m pip install build twine
+      - run: python -m build
+      - run: twine check --strict dist/*
+      - name: Test the built wheel
+        run: |
+          python -m pip install dist/*.whl pytest pytest-timeout httpx websocket-client
+          cp -r tests "$RUNNER_TEMP/tests" && cd "$RUNNER_TEMP/tests" && python -m pytest -q -o timeout=60 .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/slapdash/
+    permissions:
+      id-token: write  # for PyPI trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

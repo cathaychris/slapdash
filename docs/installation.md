@@ -29,6 +29,12 @@ pixi run frontend-dev           # rebuild the frontend on changes
 
 The frontend sources are in `./frontend`; the build is written to `./slapdash/frontend`, which is served by the Python package, so commit the built files after changing the frontend. While developing the frontend, run `pixi run frontend-dev` alongside a dashboard on port 8000 (e.g. `pixi run python -m slapdash.examples hello_world`) and reload http://localhost:8000 after changes. Run `pixi run frontend-build` before committing, as the development build is not minified.
 
+### Releasing
+
+1. Bump `__version__` in `slapdash/version.py` (semantic versioning; note that clients refuse servers with a different major version) and merge it to `main`.
+2. Create a GitHub release from `main` with the tag `v<version>`, e.g. `v1.1.0`.
+3. The `publish` workflow checks that the tag matches the version, builds and tests the package, and uploads it to PyPI via trusted publishing.
+
 ## Examples
 
 Run
