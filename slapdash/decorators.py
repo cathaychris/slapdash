@@ -1,14 +1,40 @@
 import json
 import asyncio
+import contextvars
 import types
 from typing import Any
 import logging
 import functools
-import inspect
 from enum import Enum
-from .model import BASE_TYPES
+from .types import BASE_TYPES
 
 logger = logging.getLogger(__name__)
+
+# set while `@Saver` reads values to save, so that `trigger_update` does not emit
+_saving_settings = contextvars.ContextVar('slapdash_saving_settings', default=False)
+
+_STARTUP_ATTR = '_slapdash_startup'
+
+
+def on_dashboard_start(obj, coro_factory):
+    '''Run the coroutine produced by `coro_factory()` as a task on the dashboard event loop.
+
+    If called from within a running event loop the task starts right away; otherwise it is
+    started by `slapdash.run` once its event loop is set up.'''
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        obj.__dict__.setdefault(_STARTUP_ATTR, []).append(coro_factory)
+    else:
+        create_dashboard_task(coro_factory(), loop)
+
+
+def start_pending_tasks(interfaces, loop):
+    '''Start tasks registered with `on_dashboard_start` on any of `interfaces`.'''
+    for interface in interfaces:
+        for coro_factory in getattr(interface, '__dict__', {}).pop(_STARTUP_ATTR, []):
+            create_dashboard_task(coro_factory(), loop)
+
 
 def refresh(attr: str, delay: int = 1, delay_attr: str = None):
     '''
@@ -72,9 +98,9 @@ def refresh(attr: str, delay: int = 1, delay_attr: str = None):
                                 pass
                         await asyncio.sleep(_delay)
 
-                loop = asyncio.get_event_loop()
-                loop.call_soon(lambda: create_dashboard_task(start_counter(), loop))
-        Wrapped.__name__ = cls.__name__
+                on_dashboard_start(self, start_counter)
+        for attr_name in ('__module__', '__name__', '__qualname__', '__doc__'):
+            setattr(Wrapped, attr_name, getattr(cls, attr_name))
         return Wrapped
     return decorator
 
@@ -123,7 +149,7 @@ def trigger_update(target_attr: str):
 
         def emit_target_update(interface):
             '''Emits a message with the status of a secondary target.'''
-            if '_save_setting' not in [s.function for s in inspect.stack()]:
+            if not _saving_settings.get():
                 if hasattr(interface, '__data_model__'):
                     source_model = interface.__data_model__
                     parent_name = source_model.parent_name
@@ -191,38 +217,41 @@ def saver_original_class_name(cls):
     if 'DashboardSavingInterface' in [m.__name__ for m in mro]:
         try:
             name = mro[1].__name__
-        except:
+        except IndexError:
             pass
     return name
+
+def _get_attr_or_item(this, k):
+    '''Get attribute `k` of `this`, falling back to item access (e.g. list indices).'''
+    try:
+        return getattr(this, k)
+    except (AttributeError, TypeError):  # TypeError: non-str attribute name
+        if isinstance(this, (list, tuple)) and isinstance(k, str) and k.isdigit():
+            k = int(k)  # JSON keys are always strings
+        return this[k]
 
 def saver_enum_check(this, k, v):
     '''If the class parameter is an enum, replace the saved string
     setting to the enum member before setting it, thus preserving the enum type.
     Will raise an error if the string is not a member of the enum class.'''
     try:
-        subject = getattr(this, k)
-    except AttributeError:
-        try:
-            subject = this[k]
-        except TypeError:  # object not subscriptable
-            subject = None
-    if Enum in subject.__class__.__mro__:
+        subject = _get_attr_or_item(this, k)
+    except (KeyError, IndexError, TypeError):  # missing, or object not subscriptable
+        subject = None
+    if isinstance(subject, Enum):
         return subject.__class__(v)
     else:
         return v
 
 def saver_type_check(this, k, v) -> None:
     '''Check that loaded setting types match class parameter types'''
-    try:
-        subject = getattr(this, k)
-    except AttributeError:
-        subject = this[k]
+    subject = _get_attr_or_item(this, k)
     ktype = type(subject)
     if (ktype in BASE_TYPES.values()) and (ktype != type(v)):  # base value type does not match
         raise TypeError(
             f'Cannot override class parameter `{saver_original_class_name(this)}.{k}` (type `{ktype.__name__}`) from settings file using type `{type(v).__name__}`')
-    elif list in v.__class__.__mro__:  # for arrays, check that first value types match
-        ktype = type(getattr(this, k)[0])
+    elif isinstance(v, list) and v and isinstance(subject, (list, tuple)) and subject:  # for arrays, check that first value types match
+        ktype = type(subject[0])
         if type(v[0]) in BASE_TYPES.values() and (not ktype == type(v[0])):
             raise TypeError(
                 f'Cannot override class parameter `{saver_original_class_name(this)}.{k}` (array member type `{ktype.__name__}`) from settings file using array member type `{type(v[0]).__name__}`')
@@ -232,8 +261,11 @@ def setattr_or_setitem(this, k, v):
     item-by-item instead of potentially
     overriding subclassed `list` types.'''
     if type(v) is list:
+        target = _get_attr_or_item(this, k)
         for ii, vi in enumerate(v):
-            getattr(this, k)[ii] = vi
+            target[ii] = vi
+    elif isinstance(k, int):
+        this[k] = v
     else:
         setattr(this, k, v)
 
@@ -265,10 +297,10 @@ class Saver:
                 self._settings = json.load(f)
         except FileNotFoundError as e:
             logger.error(f"Missing settings file: {settings_path}")
-            raise(e)
+            raise e
         except json.decoder.JSONDecodeError as e:
             logger.error(f"Invalid settings file: {settings_path}")
-            raise(e)
+            raise e
 
     def __call__(parent, cls):
         '''cls is what the decorator acts on'''
@@ -281,13 +313,6 @@ class Saver:
 
             def _save_setting(self, setting_name):
                 '''Programmatically save settings of supplied keywords, using prototype settings.'''
-                def getattr_notrigger(obj, name):
-                    try:
-                        if hasattr(obj, 'nerp'):
-                            pass
-                    except:
-                        pass
-
                 def nested_set(dic, keys, value):
                     '''Build up a dictionary of saved values, save to JSON'''
                     for key in keys[:-1]:
@@ -309,8 +334,12 @@ class Saver:
                             return next_object.value
                         else:
                             return next_object  # this is our desired value
-                nested_set(self._settings, setting_name,
-                           walk_get(self, setting_name))
+                token = _saving_settings.set(True)
+                try:
+                    value = walk_get(self, setting_name)
+                finally:
+                    _saving_settings.reset(token)
+                nested_set(self._settings, setting_name, value)
                 with open(self._settings_path, 'w') as f:
                     json.dump(self._settings, f, indent=4)
 
@@ -345,16 +374,16 @@ class Saver:
                                         setattr_or_setitem(this, k, v)
                                     except TypeError:
                                         raise
-                                elif hasattr(this, int(k)):  # noqa with JSON dictionary using key (str) to refer to array index (int)
+                                elif isinstance(this, list) and k.isdigit() and int(k) < len(this):  # JSON uses str keys for array indices
                                     k = int(k)
                                     logger.info(
-                                        f'Will set {saver_original_class_name(this)}.{k} from {getattr(this, k)} to {v}')
+                                        f'Will set {saver_original_class_name(this)}[{k}] from {this[k]} to {v}')
                                     try:
                                         saver_type_check(this, k, v)
                                         setattr_or_setitem(this, k, v)
                                     except TypeError:
                                         raise
-                                else:
+                                elif hasattr(this, 'keys'):
                                     # this arises e.g. when you have a dictionary, which always has string keys in json,
                                     # applied to a dictionary with non-string keys in python. solution: set whole dictionary
                                     # OR it can happen with a subclass
@@ -371,6 +400,8 @@ class Saver:
                                         logger.info(
                                             f'Setting {saver_original_class_name(this)} to {settings}')
                                         this = settings
+                                else:
+                                    raise ValueError(k)
                             except ValueError:
                                 logger.warning(
                                     f'The setting `{k}` is not present in the model and cannot be set.')
@@ -378,13 +409,13 @@ class Saver:
                 logger.info('Done loading settings')
 
             def _trigger_save(self, message):
-                def iter_leafs(d, keys=[]):
+                def iter_leafs(d, keys=()):
                     '''Get settings trees like (['optosigma', 'channels', '0', 'step_sizes', 'backward'], 2890)'''
                     for key, val in d.items():
                         if isinstance(val, dict):
-                            yield from iter_leafs(val, keys + [key])
+                            yield from iter_leafs(val, [*keys, key])
                         else:
-                            yield keys + [key], val
+                            yield [*keys, key], val
                 valid_settings = list(iter_leafs(self._settings))
                 try:
                     valid_settings_names = list(zip(*valid_settings))[0]
@@ -407,17 +438,14 @@ def _get_result_and_raise_exceptions(task: asyncio.Task) -> None:
         task.result()
     except asyncio.CancelledError:
         pass  # Task cancellation should not be logged as an error.
-    except Exception as exc:  # pylint: disable=broad-except
-        # logging.exception('Exception raised by task = %r', task)
-        raise
 
-def create_dashboard_task(coro, loop) -> asyncio.Task:
+def create_dashboard_task(coro, loop=None) -> asyncio.Task:
     '''Wraps a task normally called with `create_task` in asyncio
     to properly "catch" exceptions that would normally not get
     retrieved, and thus would be prone to shut down the whole process.
     Supply the same arguments as you would to `loop.create_task(coro)`.'''
     if not loop:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
     task = loop.create_task(coro)
     task.add_done_callback(_get_result_and_raise_exceptions)
     return task
@@ -426,8 +454,6 @@ def run_dashboard_coroutine_threadsafe(coro, loop) -> asyncio.Future:
     '''Wraps a task normally called with `asyncio.run_coroutine_threadsafe`
     to properly "catch" exceptions that would normally not get
     retrieved, and thus would be prone to shut down the whole process.'''
-    if not loop:
-        loop = asyncio.get_event_loop()
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     future.add_done_callback(_get_result_and_raise_exceptions)
     return future

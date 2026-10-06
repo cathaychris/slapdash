@@ -18,7 +18,6 @@ nav:
     - API Reference:
       - reference/api/main.md
       - reference/api/model.md
-      - reference/api/dashboard.md
       - reference/api/client.md
       - reference/api/web.md
       - reference/api/metadata.md
@@ -38,7 +37,7 @@ theme:
     - navigation.top
     - navigation.expand
     - navigation.sections
-    - earch.highlight
+    - search.highlight
     - search.suggest
   palette:
     - scheme: default
@@ -54,12 +53,7 @@ theme:
         icon: material/toggle-switch-off-outline
         name: Switch to light mode
   icon:
-    repo: fontawesome/brands/gitlab
-
-extra_javascript:
-  - https://polyfill.io/v3/polyfill.min.js?features=es6
-#   - javascripts/mathjax.js
-#   - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+    repo: fontawesome/brands/github
 
 markdown_extensions:
   - pymdownx.highlight:
@@ -70,20 +64,18 @@ markdown_extensions:
   - pymdownx.tabbed:
         alternate_style: true
   - pymdownx.emoji:
-        emoji_index: !!python/name:materialx.emoji.twemoji
-        emoji_generator: !!python/name:materialx.emoji.to_svg
+        emoji_index: !!python/name:material.extensions.emoji.twemoji
+        emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - toc:
       permalink: true
 
 extra_css:
   - css/custom.css
 
-dashboards:
+plugins:
   - search
   - include-markdown
-  - mkdocstrings:
-      watch:
-        - slapdash
+  - mkdocstrings
   - gen-files:
       scripts:
         - docs/scripts/gen_metadata_docs.py  # or any other name or path

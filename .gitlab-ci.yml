@@ -1,37 +1,35 @@
 stages:
-  - prepare
   - build
 
-cache:
-  key: python-venv
-  paths:
-    - .venv
+variables:
+  PIXI_HOME: "$CI_PROJECT_DIR/.pixi-home"
 
-prepare:
-  stage: prepare
+cache:
+  key:
+    files:
+      - pixi.lock
+  paths:
+    - .pixi
+    - .pixi-home
+
+default:
   tags:
     - py3.8
-  script:
-    - python -m venv .venv
-    - source .venv/bin/activate
-    - BASE_URL=`echo $CI_REPOSITORY_URL | sed "s;\/*$CI_PROJECT_PATH.*;;"`
-    - pip install .[dev,docs]
+  before_script:
+    - curl -fsSL https://pixi.sh/install.sh | bash
+    - export PATH="$PIXI_HOME/bin:$PATH"
 
 test:
   stage: build
-  tags:
-    - py3.8
   script:
-    - source .venv/bin/activate
-    - pytest -v
+    - pixi run --locked lint
+    - pixi run --locked test
+    - pixi run --locked -e test-py310 test
 
 build-docs:
   stage: build
-  tags:
-    - py3.8
   script:
-    - source .venv/bin/activate
-    - mkdocs build
+    - pixi run --locked -e docs docs-build
     - cp -r site /home/wwwslapdocs/public/slapdash
   rules:
-    - if: $CI_COMMIT_BRANCH == "master"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

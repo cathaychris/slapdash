@@ -1,40 +1,126 @@
-[tool.poetry]
+[project]
 name = "slapdash"
-version = "1.0.3"
+dynamic = ["version"]
 description = "Create device and application control dashboards instantly"
-authors = ["Matt Grau <graum@phys.ethz.ch>", "Chris Axline <chris@axlines.org>", "Carmelo Mordini <cmordini@phys.ethz.ch>"]
 readme = "README.md"
-packages = [{include = "slapdash"}]
+license = "MIT"
+authors = [
+    { name = "Matt Grau", email = "graum@phys.ethz.ch" },
+    { name = "Chris Axline", email = "chris@axlines.org" },
+    { name = "Carmelo Mordini", email = "cmordini@phys.ethz.ch" },
+]
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Framework :: FastAPI",
+    "Operating System :: OS Independent",
+]
+# Lower bounds only: slapdash is a library and is installed alongside other
+# packages, so upper bounds here quickly turn into resolver conflicts.
+dependencies = [
+    "fastapi>=0.100",
+    "uvicorn>=0.23",
+    "python-socketio>=5.8",
+    "websockets>=11",
+    "requests>=2.28",
+]
 
-[tool.poetry.dependencies]
-python = "^3.7"
-requests = "^2.28.1"
-fastapi = "^0.88.0"
-uvicorn = "^0.20.0"
-aiofiles = "^22.1.0"
-python-socketio = "^4.6.1"
-websockets = "^10.4"
-matplotlib = {version = "*", optional = true}
-
-[tool.poetry.group.dev.dependencies]
-pylint = "*"
-autopep8 = "*"
-pytest = "*"
-pytest-cov = "*"
-
-[tool.poetry.group.docs.dependencies]
-mkdocs = "*"
-mkdocs-material = "*"
-mkdocs-include-markdown-plugin = "*"
-mkdocs-gen-files = "*"
-mkdocstrings = "*"
-
-[tool.poetry.extras]
+[project.optional-dependencies]
 examples = ["matplotlib"]
 
-[tool.setuptools.package-data]
-slapdash = ['frontend/*', 'examples/*', 'version.json']
+[project.urls]
+Homepage = "https://github.com/cathaychris/slapdash"
+Documentation = "https://github.com/cathaychris/slapdash/tree/main/docs"
+
+[dependency-groups]
+test = ["pytest>=8", "pytest-cov", "pytest-timeout", "httpx", "websocket-client"]
+lint = ["ruff"]
+docs = [
+    "mkdocs",
+    "mkdocs-material",
+    "mkdocs-include-markdown-plugin",
+    "mkdocs-gen-files",
+    "mkdocstrings[python]",
+]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "slapdash/version.py"
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/frontend", "/docs", "/.pixi", "/pixi.lock", "/mkdocs.yml", "/.gitlab-ci.yml", "/.github"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["slapdash"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 60
+filterwarnings = ["error::SyntaxWarning"]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = ["frontend", "slapdash/frontend"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "ASYNC"]
+ignore = [
+    "E501",   # long lines are common in log/error messages
+    "E721",   # exact type comparisons are intentional in the model
+    "B010",   # setattr with constant is used to install dunder methods
+    "B026",   # star-arg unpacking after keywords is part of the `run`/`Client` signatures
+    "B904",   # exception chaining style
+    "B905",   # zip(strict=) style
+]
+
+# ---------------------------------------------------------------------------
+# pixi
+# ---------------------------------------------------------------------------
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["win-64", "linux-64", "osx-64", "osx-arm64"]
+
+[tool.pixi.dependencies]
+python = ">=3.10"
+
+[tool.pixi.pypi-dependencies]
+slapdash = { path = ".", editable = true }
+
+[tool.pixi.feature.py310.dependencies]
+python = "3.10.*"
+
+[tool.pixi.feature.py313.dependencies]
+python = "3.13.*"
+
+[tool.pixi.feature.frontend.dependencies]
+nodejs = ">=20"
+
+[tool.pixi.feature.frontend.tasks]
+frontend-install = { cmd = "npm install", cwd = "frontend" }
+frontend-build = { cmd = "npm run build", cwd = "frontend", depends-on = ["frontend-install"] }
+frontend-dev = { cmd = "npm run watch", cwd = "frontend", depends-on = ["frontend-install"] }
+
+[tool.pixi.feature.test.tasks]
+test = "pytest"
+test-cov = "pytest --cov=slapdash --cov-report=term-missing"
+
+[tool.pixi.feature.lint.tasks]
+lint = "ruff check slapdash tests"
+
+[tool.pixi.feature.docs.tasks]
+docs = "mkdocs serve"
+docs-build = "mkdocs build"
+
+[tool.pixi.tasks]
+examples = "python -m slapdash.examples"
+
+[tool.pixi.environments]
+default = { features = ["test", "lint", "examples"], solve-group = "default" }
+docs = { features = ["docs"], solve-group = "default" }
+frontend = { features = ["frontend"], no-default-feature = true }
+test-py310 = { features = ["test", "py310"] }
+test-py313 = { features = ["test", "py313"] }

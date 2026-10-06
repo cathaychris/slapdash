@@ -63,6 +63,28 @@ from slapdash.examples import run_example
 run_example('doc_example')
 ```
 
+# Installation
+
+Slapdash requires Python 3.10 or newer.
+
+```bash
+pip install git+https://github.com/cathaychris/slapdash
+```
+
+# Development
+
+The development environment is managed with [pixi](https://pixi.sh):
+
+```bash
+pixi run test             # run the test suite
+pixi run lint             # run ruff
+pixi run -e docs docs     # serve the documentation locally
+pixi run frontend-build   # rebuild the web frontend into slapdash/frontend
+pixi run examples         # list the bundled examples
+```
+
+Tests can also be run against the oldest and newest supported Python with `pixi run -e test-py310 test` and `pixi run -e test-py313 test`.
+
 # Credits
 
 Slapdash was developed in the [TIQI group](https://tiqi.ethz.ch/) at ETH Zürich, primarily by [Matt Grau](https://www.odu.edu/directory/matt-grau).

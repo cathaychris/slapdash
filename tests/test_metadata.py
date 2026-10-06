@@ -5,7 +5,7 @@ metadata2 = dict(min=-5, max=5, step=1)
 
 class Subclass:
     '''This subclass has a docstring.'''
-    
+
     f = 1
 
 class Simple:
@@ -112,3 +112,44 @@ def test_function_wrapping():
 
 if __name__ == '__main__':
     test_function_wrapping()
+
+def test_invalid_metadata_is_dropped(caplog):
+    class Invalid:
+        _v = 1.0
+
+        @slapdash.metadata({'min': 0, 'notAThing': 1, 'max': 'ten', 'renderAs': 'hologram', 'units': 'V'})
+        @property
+        def v(self) -> float:
+            return self._v
+
+        @slapdash.metadata({'renderAs': 'slider'})
+        @property
+        def w(self) -> float:
+            return self._v
+
+        @slapdash.metadata({'mapping': ['off', 'on']})
+        @property
+        def x(self) -> float:  # mapping only applies to bools
+            return self._v
+
+    props = slapdash.Model(Invalid()).props()
+    assert props['v']['metadata'] == {'min': 0, 'units': 'V'}
+    assert props['w']['metadata'] == {'renderAs': 'slider'}
+    assert props['x']['metadata'] == {}
+    assert 'notAThing' in caplog.text
+    assert 'hologram' in caplog.text
+
+
+def test_graph_metadata_keeps_raw_list():
+    class Graph:
+        @slapdash.metadata({'renderAs': 'graph'})
+        @property
+        def data(self):
+            return [0, 1, 2], [3, 4, 5]
+
+        empty = []
+
+    model = slapdash.Model(Graph())
+    assert model.props()['data']['metadata'] == {'renderAs': 'graph'}
+    assert model['data'] == ([0, 1, 2], [3, 4, 5])
+    assert model.serialize()['empty'] == []

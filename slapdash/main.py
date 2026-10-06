@@ -5,15 +5,24 @@ import signal
 from .model import Model
 from .web import web_api
 from .version import __version__
+from .decorators import start_pending_tasks
+
+# shutdown callbacks of running servers, keyed by event loop (see `request_shutdown`)
+_shutdown_handlers = {}
+
+
+def request_shutdown(loop):
+    '''Gracefully stop the slapdash server running on `loop`. Safe to call from any thread.'''
+    loop.call_soon_threadsafe(_shutdown_handlers[loop])
 
 
 def run(interface,
         host: str = '0.0.0.0',
         port: int = 8000,
         enable_web: bool = True,
-        servers: list = [],
+        servers: list = (),
         loop=None,
-        web_settings: dict = {},
+        web_settings: dict = None,
         *args, **kwargs
         ):
     '''
@@ -26,10 +35,10 @@ def run(interface,
 
         enable_web (bool=True): Disable this in case you will only use your own add-in servers.
 
-        servers (Server | list=[]): Any number of server factories that produce functions that spawn servers, which will share the data model produced from `interface`.
-        These functions should accept arguments (data_model, info) and will be passed any additional (*args, **kwargs) supplied to `run()`,
-        where `info` will include the data model name, slapdash version, web port, and any supplied `web_settings`.
-        They should return a server instance with the method `serve()` that mirrors that of `uvicorn.Server`.
+        servers (Server | list=()): Any number of server factories that produce functions that spawn servers, which will share the data model produced from `interface`.
+            These functions should accept arguments (data_model, info) and will be passed any additional (*args, **kwargs) supplied to `run()`,
+            where `info` will include the data model name, slapdash version, web port, and any supplied `web_settings`.
+            They should return a server instance with the method `serve()` that mirrors that of `uvicorn.Server`.
 
         loop (None): Specify an event loop to use to run all servers, in case you would prefer that the dashboard not create its own.
 
@@ -51,17 +60,12 @@ def run(interface,
         'name': data_model.name,
         'version': __version__,
         'web_port': port,
-        'web_settings': web_settings,
+        'web_settings': {} if web_settings is None else web_settings,
         **kwargs
     }
     if loop is None:
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-    else:
-        asyncio.set_event_loop(loop)
+        loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     # if wrapped with @Saver, attach DashboardSavingInterface's saving callback to all model changes
     if 'DashboardSavingInterface' in [c.__name__ for c in type(data_model._interface).__mro__]:
@@ -72,62 +76,57 @@ def run(interface,
             data_model._interface._trigger_save(message)
         data_model.emit = emit
 
-    addin_servers = []
-    try: # accept single server factor or list thereof
-        _ = iter(servers)
-    except TypeError: # not iterable
-        additional_server = servers(data_model, info, *args, **kwargs)
-        try:
-            additional_server.install_signal_handlers = lambda: None
-        except:
-            pass
-        loop.create_task(additional_server.serve())
-        addin_servers.append(additional_server)
-    else: # iterable
-        for server_factory in servers:
-            server = server_factory(data_model, info, *args, **kwargs)
-            try:
-                server.install_signal_handlers = lambda: None
-            except:
-                pass
-            loop.create_task(server.serve())
-            addin_servers.append(server)
-    addin_server_info = []
-    for i, s in enumerate(addin_servers):
-        sn = s.__module__ + '.' + s.__class__.__name__
-        addin_server_info.append({'name': sn})
-        try: # _host and _port may not exist for all add-in servers
-            addin_server_info[i].update({'host': s._host, 'port': s._port})
-        except:
-            pass
-    info['addin_servers'] = addin_server_info
+    if callable(servers):  # accept single server factory or list thereof
+        servers = [servers]
+    addin_servers = [server_factory(data_model, info, *args, **kwargs) for server_factory in servers]
+    info['addin_servers'] = []
+    for server in addin_servers:
+        server_info = {'name': server.__module__ + '.' + server.__class__.__name__}
+        if hasattr(server, '_host') and hasattr(server, '_port'):  # not present for all add-in servers
+            server_info.update({'host': server._host, 'port': server._port})
+        info['addin_servers'].append(server_info)
+
+    all_servers = list(addin_servers)
     if enable_web:
         wapi = web_api(data_model=data_model, info=info, *args, **kwargs)
-        web_server = uvicorn.Server(uvicorn.Config(wapi, host=host, port=port))
-        # overwrite uvicorn's signal handlers, otherwise it will bogart SIGINT and
-        # SIGTERM, which makes it impossible to escape out of
-        web_server.install_signal_handlers = lambda: None
-        loop.create_task(web_server.serve())
+        all_servers.append(uvicorn.Server(uvicorn.Config(wapi, host=host, port=port)))
+
+    server_tasks = []
+    for server in all_servers:
+        # overwrite the signal handlers of uvicorn<0.29 (and alike), otherwise it will
+        # bogart SIGINT and SIGTERM, which makes it impossible to escape out of
+        try:
+            server.install_signal_handlers = lambda: None
+        except AttributeError:
+            pass
+        server_tasks.append(loop.create_task(server.serve()))
+
+    # start background tasks registered before the loop existed, e.g. by `@refresh`
+    start_pending_tasks(data_model.iter_interfaces(), loop)
 
     async def stop_loop():
+        # ask uvicorn-like servers to exit cleanly, so that they release their sockets
+        for server in all_servers:
+            if hasattr(server, 'should_exit'):
+                server.should_exit = True
+        if server_tasks:
+            await asyncio.wait(server_tasks, timeout=5)
+        current = asyncio.current_task()
+        for task in asyncio.all_tasks(loop):
+            if task is not current:
+                task.cancel()
         loop.stop()
         print('Slapdash server shutting down')
 
-    def shutdown():
-        try:
-            tasks = asyncio.all_tasks(loop)
-        except AttributeError:
-            # asyncio API change in python3.6
-            tasks = asyncio.Task.all_tasks(loop)
+    stopping = False
 
-        for task in tasks:
-            # here creating an exception when trying to shutdown might be dangerous
-            # throw out any of these exceptions
-            try:
-                task.cancel()
-            except:  # noqa
-                pass
-        loop.create_task(stop_loop())
+    def shutdown():
+        nonlocal stopping
+        if not stopping:
+            stopping = True
+            loop.create_task(stop_loop())
+
+    _shutdown_handlers[loop] = shutdown
 
     def custom_exception_handler(loop, context):
         # if any background task creates an unhandled exception, shut down the entire loop
@@ -135,7 +134,9 @@ def run(interface,
         loop.default_exception_handler(context)
 
         # here we exclude most kinds of exceptions from triggering this kind of shutdown
-        exc = context['exception']
+        exc = context.get('exception')
+        if exc is None:
+            return  # e.g. warnings about unclosed resources
         if type(exc) not in [RuntimeError, KeyboardInterrupt, asyncio.CancelledError]:
             if enable_web:
                 async def emit_exception():
@@ -156,8 +157,19 @@ def run(interface,
     print('Starting Slapdash server')
     try:
         loop.run_forever()
+    except KeyboardInterrupt:
+        pass
     finally:
-        try:
-            loop.close()
-        except:  # noqa
-            pass
+        _shutdown_handlers.pop(loop, None)
+        _cancel_all_tasks(loop)
+        loop.close()
+
+
+def _cancel_all_tasks(loop):
+    '''Cancel leftover tasks and let them finish, like `asyncio.run` does on exit.'''
+    tasks = [task for task in asyncio.all_tasks(loop) if not task.done()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+    loop.run_until_complete(loop.shutdown_asyncgens())

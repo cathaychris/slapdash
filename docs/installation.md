@@ -2,37 +2,32 @@
 
 ## Requirements
 
-slapdash requires Python 3.6+ because it uses type annotation and [FastAPI](https://fastapi.tiangolo.com/) and [Starlette](https://www.starlette.io/) to generate the web backend.
-
-### Optional (Virtual Environment)
-
-We recommend setting up a [virtual environment](https://docs.python.org/3/tutorial/venv.html). It basically creates a clean install of python without any additional packages, which can make debugging much easier.
-
-```bash
-python3 -m venv slapdash-venv
-source slapdash-venv/bin/activate
-```
-
-Now if you run `python` or `pip` it will only see the packages you have installed in this virtual environment. To leave the virtual environment use `deactivate`.
-
-### Development
-
-You can also develop the Python package by using poetry and installing with `poetry install`. Optional packages used in the examples can be installed in a similar way with they keyword `examples`. Development dependencies will automatically be installed. Alternatively, you can develop using this package as a dependency in development mode as part of another repository.
-
-Perform tests with `poetry run pytest`, for example. See `pytest` documentation for further options.
-
-To develop the frontend, go to `./frontend` and run `npm install`, then `npm run start` to test changes in real time, and `npm run build` to finally build.
+slapdash requires Python 3.10+ because it uses type annotations and [FastAPI](https://fastapi.tiangolo.com/) and [Starlette](https://www.starlette.io/) to generate the web backend.
 
 ## Install
 
-`pip` will install most slapdash dependencies automatically, or you can use `poetry`. When using `slapdash` as a dependency in another project through `poetry`, you will need `poetry>1.2.0` in order to resolve the dependency grouping properly.
+Install slapdash into your project's environment, e.g. with `pip`:
 
 ```bash
-pip install wheel
 pip install git+https://github.com/cathaychris/slapdash
 ```
 
-If you get an error you might need to first install `wheel` and `setuptools` using `pip`.
+or by adding it as a PyPI/git dependency of your `pixi`, `uv` or `poetry` project. slapdash only declares lower bounds for its dependencies, so it can be combined with other packages using recent versions of FastAPI, uvicorn and python-socketio. Optional packages used in the examples can be installed with the `examples` extra (`slapdash[examples]`).
+
+## Development
+
+slapdash is developed with [pixi](https://pixi.sh), which manages the Python environments as well as Node.js for the frontend. After cloning the repository:
+
+```bash
+pixi run test                   # run the tests (default environment, latest Python)
+pixi run -e test-py310 test     # run the tests on the oldest supported Python
+pixi run lint                   # lint with ruff
+pixi run -e docs docs           # serve these docs at http://localhost:8000
+pixi run frontend-build         # install npm packages and build the frontend
+pixi run frontend-dev           # rebuild the frontend on changes
+```
+
+The frontend sources are in `./frontend`; the build is written to `./slapdash/frontend`, which is served by the Python package, so commit the built files after changing the frontend. While developing the frontend, run `pixi run frontend-dev` alongside a dashboard on port 8000 (e.g. `pixi run python -m slapdash.examples hello_world`) and reload http://localhost:8000 after changes. Run `pixi run frontend-build` before committing, as the development build is not minified.
 
 ## Examples
 

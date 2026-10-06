@@ -10,7 +10,7 @@ import Badge from "react-bootstrap/Badge";
 import { Store, ReactNotifications } from "react-notifications-component";
 import Group from "./group";
 import { alert_options } from "./alerting";
-import version from "../../slapdash/version.json";
+declare const __SLAPDASH_VERSION__: string; // injected by build.mjs
 
 import "react-notifications-component/dist/theme.css";
 import "bootstrap/dist/css/bootstrap.min.css";
@@ -78,7 +78,7 @@ function OptionCheckboxes(props) {
       <ListGroup.Item style={{ textAlign: "center" }}>
         <Badge pill bg="light" text="dark">
           <span>
-            Web client version {version.major}.{version.minor}.{version.patch}
+            Web client version {__SLAPDASH_VERSION__}
           </span>
           <br />
           <span>Server version {props.info.version}</span>
@@ -195,7 +195,7 @@ export default class App extends React.PureComponent<
       document.title = `${name_request.data} - Slapdash Interface`;
     }
 
-    this.io = io.connect(this.props.api, { path: "/ws/socket.io" });
+    this.io = io(this.props.api, { path: "/ws/socket.io" });
     this.io.on("connect", () => {});
     this.io.on("disconnect", () => {});
     this.io.on("notify", (msg) => {

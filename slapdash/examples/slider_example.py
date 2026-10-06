@@ -22,7 +22,7 @@ class SliderSubclass:
     @float_prop.setter
     def float_prop(self, value: float):
         self._float_prop = value
-        
+
 @refresh('readonly_slider', 1.)
 class SliderDashboard:
     number: float = 111.0

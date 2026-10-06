@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import slapdash
 from slapdash import Saver
 
@@ -7,10 +9,10 @@ class Ammo:
     miniguns: int = 0
 
 
-@Saver('examples/settings.json')  # settings are loaded when decorator is read
+@Saver(Path(__file__).parent / 'settings.json')  # settings are loaded when decorator is read
 class Interface:
     '''This model demonstrates the effect of the `Saver` decorator,
-    which means that attributes present in the `examples/settings.json`
+    which means that attributes present in the `settings.json`
     schema will be loaded into the dashboard when it first runs, and saved
     back into the JSON file whenever they are changed.'''
 

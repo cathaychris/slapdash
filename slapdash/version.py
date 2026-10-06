@@ -1,15 +1,5 @@
-import os
-import json
-
-parent_dir_path = os.path.dirname(os.path.realpath(__file__))
-version_filename = os.path.join(parent_dir_path, 'version.json')
-with open(version_filename) as version_file:
-    version = json.load(version_file)
-
-__major__ = version['major']
-__minor__ = version['minor']
-__patch__ = version['patch']
-__version__ = f"{__major__}.{__minor__}.{__patch__}"
+__version__ = "1.1.0"
+__major__, __minor__, __patch__ = (int(v) for v in __version__.split("."))
 
 # This uses Semantic Versioning 2.0.0
 
@@ -19,4 +9,5 @@ __version__ = f"{__major__}.{__minor__}.{__patch__}"
 # 3. PATCH version when you make backwards compatible bug fixes.
 # Additional labels for pre-release and build metadata are available as extensions to the MAJOR.MINOR.PATCH format.
 
-# The version update should always accompany a merge into the master branch
+# The version update should always accompany a merge into the main branch.
+# Note that `Client` refuses to connect to a server with a different MAJOR version.
